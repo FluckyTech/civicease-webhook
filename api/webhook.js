@@ -1,26 +1,49 @@
-const express = require('express');
+// api/webhook.js
+const { GoogleSpreadsheet } = require('google-spreadsheet');
 const { WebhookClient } = require('dialogflow-fulfillment');
 
-const app = express();
-app.use(express.json());
+const SHEET_ID = process.env.SHEET_ID; // set in Vercel dashboard
+const SERVICE_ACCOUNT_EMAIL = process.env.SA_EMAIL; // set in Vercel
+const PRIVATE_KEY = process.env.SA_PRIVATE_KEY; // set in Vercel (with \n handled)
 
-app.post('/api/webhook', (req, res) => {
+module.exports = async (req, res) => {
   const agent = new WebhookClient({ request: req, response: res });
 
-  function reportIssue(agent) {
-    const problem = agent.parameters.problem_type || "unknown problem";
-    const area = agent.parameters.Area || "unknown area";
-    const description = agent.parameters.Description || "No description provided";
+  async function reportIssue(agent) {
+    try {
+      // read parameters coming from Dialogflow
+      const problem = agent.parameters.problem_type || 'unknown';
+      const area = agent.parameters.Area || 'unknown';
+      const description = agent.parameters.Description || '';
 
-    console.log(`Problem: ${problem}, Area: ${area}, Description: ${description}`);
-    agent.add(`Thanks! Your report for a ${problem} at ${area} has been recorded.`);
+      // attempt to write to Google Sheet (if configuration present)
+      if (SHEET_ID && SERVICE_ACCOUNT_EMAIL && PRIVATE_KEY) {
+        const doc = new GoogleSpreadsheet(SHEET_ID);
+        await doc.useServiceAccountAuth({
+          client_email: SERVICE_ACCOUNT_EMAIL,
+          private_key: PRIVATE_KEY.replace(/\\n/g, '\n'),
+        });
+        await doc.loadInfo();
+        const sheet = doc.sheetsByIndex[0]; // first sheet
+        await sheet.addRow({
+          Timestamp: new Date().toISOString(),
+          Problem: problem,
+          Area: area,
+          Description: description,
+        });
+      } else {
+        console.warn('Google Sheets not configured — skipping save.');
+      }
+
+      agent.add(`✅ Report saved: ${problem} reported at ${area}. Thank you.`);
+    } catch (err) {
+      console.error('Error saving report:', err);
+      agent.add('⚠️ Sorry, something went wrong while saving your report.');
+    }
   }
 
   const intentMap = new Map();
   intentMap.set('Report Issue', reportIssue);
 
-  agent.handleRequest(intentMap);
-});
-
-// For Vercel serverless, export as module
-module.exports = app;
+  await agent.handleRequest(intentMap);
+};
